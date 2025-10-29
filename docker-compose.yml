@@ -6,7 +6,12 @@ services:
       context: ./
       dockerfile: docker/Dockerfile
     image: janus-local:latest
-    network_mode: "host"   # use host networking as requested
+    # network_mode: "host" is not reliable on Docker Desktop for macOS
+    ports:
+      - "8088:8088"
+      - "8188:8188"
+      - "7088:7088"
+      # - "60000-63000:60000-63000/udp"
     volumes:
       - ./:/janus:rw       # mount repository root into container so code is shared with host
     working_dir: /janus
