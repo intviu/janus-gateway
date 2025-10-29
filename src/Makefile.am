@@ -189,7 +189,9 @@ version.c: FORCE | $(dir_target)
 	PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" "$(PKG_CONFIG)" --modversion nice | awk 'BEGIN {} {print "const char *libnice_version_string = \""$$0"\";"} END {} ' >> version.c
 
 $(dir_present):
-	`which git` rev-parse HEAD | awk 'BEGIN {print "#include \"version.h\""} {print "const char *janus_build_git_sha = \"" $$0"\";"} END {}' > version.c
+	sha=`git rev-parse HEAD 2>/dev/null` || sha="unknown"; \
+	echo "#include \"version.h\"" > version.c; \
+	echo "const char *janus_build_git_sha = \"$$sha\";" >> version.c
 
 $(dir_absent):
 	echo "not-a-git-repo" | awk 'BEGIN {print "#include \"version.h\""} {print "const char *janus_build_git_sha = \"" $$0"\";"} END {}' > version.c
