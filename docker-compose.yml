@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  janus:
+    platform: linux/amd64 # 通过环境变量控制平台，macOS 可设为 linux/amd64，Linux 可留空
+    build:
+      context: ./
+      dockerfile: docker/Dockerfile
+    image: janus-local:latest
+    network_mode: "host"   # use host networking as requested
+    volumes:
+      - ./:/janus:rw       # mount repository root into container so code is shared with host
+    working_dir: /janus
+    restart: unless-stopped
