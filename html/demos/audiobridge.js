@@ -125,14 +125,68 @@ $(document).ready(function() {
 																if(stereo && jsep.sdp.indexOf("stereo=1") == -1) {
 																	// Make sure that our offer contains stereo too
 																	jsep.sdp = jsep.sdp.replace("useinbandfec=1", "useinbandfec=1;stereo=1");
-																	// Create a spinner waiting for the remote video
-																	$('#mixedaudio').html(
-																		'<div class="text-center">' +
-																		'	<div id="spinner" class="spinner-border" role="status">' +
-																		'		<span class="visually-hidden">Loading...</span>' +
-																		'	</div>' +
-																		'</div>');
 																}
+																// Manipulate the SDP to only offer L16/16000
+																Janus.debug("Original SDP:", jsep.sdp);
+																// Find the audio media line
+																let mline = jsep.sdp.indexOf("m=audio ");
+																if(mline !== -1) {
+																	let sdp_mline_start = jsep.sdp.substring(mline);
+																	// Find the end of the audio media section
+																	let next_mline = sdp_mline_start.indexOf("\r\nm=");
+																	let sdp_mline_part = (next_mline === -1) ? sdp_mline_start : sdp_mline_start.substring(0, next_mline);
+
+																	// Split lines
+																	let lines = sdp_mline_part.split('\r\n');
+																	let m_line_parts = lines[0].split(" ");
+																	// Get the format list (payload types)
+																	let original_formats = m_line_parts.slice(3);
+																	let new_formats = [];
+																	let pt_l16 = "106"; // Hardcode to 106 as requested
+																	new_formats.push(pt_l16);
+
+																	// Rebuild the m-line to only contain L16 payload type
+																	m_line_parts.splice(3, original_formats.length, ...new_formats);
+																	lines[0] = m_line_parts.join(" ");
+
+																	// Filter other rtpmap, rtcp-fb, and fmtp lines
+																	let new_lines = [lines[0]];
+																	let l16_rtpmap_found = false;
+																	for(let i = 1; i < lines.length; i++) {
+																		let line = lines[i];
+																		if (line.startsWith("a=rtpmap:") || line.startsWith("a=rtcp-fb:") || line.startsWith("a=fmtp:")) {
+																			let pt = line.split(" ")[0].split(":")[1];
+																			if (new_formats.includes(pt)) {
+																				new_lines.push(line);
+																				if(line.startsWith("a=rtpmap:") && line.includes("L16/16000")) {
+																					l16_rtpmap_found = true;
+																				}
+																			}
+																		} else {
+																			// Keep other lines
+																			new_lines.push(line);
+																		}
+																	}
+
+																	// If L16 rtpmap was not in the original SDP, add it now.
+																	if(!l16_rtpmap_found) {
+																		let insert_index = new_lines.findIndex(line => !line.startsWith("a=rtpmap:"));
+																		if(insert_index === -1) insert_index = new_lines.length;
+																		new_lines.splice(insert_index, 0, `a=rtpmap:${pt_l16} L16/16000`);
+																	}
+
+																	// Reconstruct the SDP part
+																	let new_sdp_part = new_lines.join('\r\n');
+																	jsep.sdp = jsep.sdp.substring(0, mline) + new_sdp_part + ((next_mline === -1) ? "" : jsep.sdp.substring(mline + next_mline));
+																	Janus.debug("Manipulated SDP:", jsep.sdp);
+																}
+																// Create a spinner waiting for the remote video
+																$('#mixedaudio').html(
+																	'<div class="text-center">' +
+																	'	<div id="spinner" class="spinner-border" role="status">' +
+																	'		<span class="visually-hidden">Loading...</span>' +
+																	'	</div>' +
+																	'</div>');
 															},
 															success: function(jsep) {
 																Janus.debug("Got SDP!", jsep);
