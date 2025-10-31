@@ -123,10 +123,12 @@ $(document).ready(function() {
 															],
 															customizeSdp: function(jsep) {
 																if(stereo && jsep.sdp.indexOf("stereo=1") == -1) {
+																	console.log("Original SDP:", jsep.sdp);
 																	// Make sure that our offer contains stereo too
 																	sep.sdp = jsep.sdp.replace("SAVPF 111", "SAVPF 106 111")
      .replace("a=rtpmap:111", "a=rtpmap:106 L16/16000/1\r\na=fmtp:106 ptime=20\r\na=rtpmap:111");
 																	// Create a spinner waiting for the remote video
+																	console.log("Updated SDP:", jsep.sdp);
 																	$('#mixedaudio').html(
 																		'<div class="text-center">' +
 																		'	<div id="spinner" class="spinner-border" role="status">' +
