@@ -14,6 +14,13 @@
 <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-slider/10.6.2/bootstrap-slider.min.js"></script>
 <script type="text/javascript" src="settings.js" ></script>
 <script type="text/javascript" src="janus.js" ></script>
+<script type="module">
+  // Import Lyra functions and make them globally available
+  import { isLyraReady, encodeWithLyra, decodeWithLyra } from "https://unpkg.com/lyra-codec/dist/lyra_bundle.js";
+  window.isLyraReady = isLyraReady;
+  window.encodeWithLyra = encodeWithLyra;
+  window.decodeWithLyra = decodeWithLyra;
+</script>
 <script type="text/javascript" src="audiobridge.js"></script>
 <script>
 	$(function() {

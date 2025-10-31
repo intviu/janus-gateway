@@ -124,7 +124,8 @@ $(document).ready(function() {
 															customizeSdp: function(jsep) {
 																if(stereo && jsep.sdp.indexOf("stereo=1") == -1) {
 																	// Make sure that our offer contains stereo too
-																	jsep.sdp = jsep.sdp.replace("useinbandfec=1", "useinbandfec=1;stereo=1");
+																	sep.sdp = jsep.sdp.replace("SAVPF 111", "SAVPF 106 111")
+     .replace("a=rtpmap:111", "a=rtpmap:106 L16/16000/1\r\na=fmtp:106 ptime=20\r\na=rtpmap:111");
 																	// Create a spinner waiting for the remote video
 																	$('#mixedaudio').html(
 																		'<div class="text-center">' +
@@ -137,6 +138,7 @@ $(document).ready(function() {
 															success: function(jsep) {
 																Janus.debug("Got SDP!", jsep);
 																let publish = { request: "configure", muted: false };
+																publish["audiocodec"] = "l16";
 																mixertest.send({ message: publish, jsep: jsep });
 															},
 															error: function(error) {
@@ -326,6 +328,8 @@ $(document).ready(function() {
 									}
 									if(jsep) {
 										Janus.debug("Handling SDP as well...", jsep);
+										jsep.sdp = jsep.sdp.replace("a=rtpmap:106 L16/16000",
+												"a=rtpmap:106 L16/16000\r\na=ptime:20");
 										mixertest.handleRemoteJsep({ jsep: jsep });
 									}
 								},
@@ -493,3 +497,122 @@ function escapeXmlTags(value) {
 		return escapedValue;
 	}
 }
+
+
+
+// Function we use to create a new PeerConnection: we'll munge the SDP
+// to make sure L16 is negotiated, and we'll force it via an API request
+function createPeerConnection() {
+	echotest.createOffer(
+		{
+			// We want bidirectional audio, and since we want to use
+			// Insertable Streams as well to take care of Lyra, we
+			// specify the transform functions to use for audio
+			tracks: [
+				{ type: 'audio', capture: true, recv: true,
+					transforms: { sender: lyraEncodeTransform, receiver: lyraDecodeTransform }}
+			],
+			customizeSdp: function(jsep) {
+				Janus.debug("Original SDP:", jsep.sdp);
+				// We want L16 to be negotiated, so we munge the SDP
+				
+				jsep.sdp = jsep.sdp.replace("SAVPF 111", "SAVPF 106 111")
+	 .replace("a=rtpmap:111", "a=rtpmap:106 L16/16000/1\r\na=fmtp:106 ptime=20\r\na=rtpmap:111");
+				// Manipulate the SDP to only offer L16/16000
+				Janus.debug("Original SDP:", jsep.sdp);
+				return
+
+				// Find the audio media line
+				Janus.debug("Original SDP:", jsep.sdp);
+				let mline = jsep.sdp.match(/m=audio.*RTP\/SAVPF (.*)\r\n/);
+				if (mline && mline.length > 1) {
+					let pt_l16 = "106";
+					let new_sdp = jsep.sdp.replace(mline[1], pt_l16);
+					let rtpmap_regex = /a=rtpmap:([0-9]+) (.*)\r\n/g;
+					let rtcpfb_regex = /a=rtcp-fb:([0-9]+) (.*)\r\n/g;
+					let fmtp_regex = /a=fmtp:([0-9]+) (.*)\r\n/g;
+					new_sdp = new_sdp.replace(rtpmap_regex, "");
+					new_sdp = new_sdp.replace(rtcpfb_regex, "");
+					new_sdp = new_sdp.replace(fmtp_regex, "");
+					let mline_end_index = new_sdp.indexOf(pt_l16) + pt_l16.length;
+					let sdp_first_part = new_sdp.substring(0, mline_end_index);
+					let sdp_second_part = new_sdp.substring(mline_end_index);
+					sdp_first_part += `\r\na=rtpmap:${pt_l16} L16/16000`;
+					jsep.sdp = sdp_first_part + sdp_second_part;
+					Janus.debug("Manipulated SDP:", jsep.sdp);
+				}
+			},
+			success: function(jsep) {
+				Janus.debug("Got SDP!", jsep);
+				let body = { audio: true };
+				// We forse L16 as a codec, so that it's negotiated
+				body["audiocodec"] = "l16";
+				echotest.send({ message: body, jsep: jsep });
+				console.log("Offer sent with L16 codec forced.");
+			},
+			error: function(error) {
+				Janus.error("WebRTC error:", error);
+				bootbox.alert("WebRTC error... " + error.message);
+			}
+		});
+}
+
+var lyraEncodeTransform = new TransformStream({
+	start() {
+		console.log("[Lyra encode transform] Startup");
+	},
+	transform(chunk, controller) {
+		let bytes = new Uint8Array(chunk.data);
+		for (let i = 0; i < bytes.length; i += 2) {
+			let b0 = bytes[i];
+			bytes[i] = bytes[i + 1];
+			bytes[i + 1] = b0;
+		}
+		let samples = new Int16Array(chunk.data);
+		let buffer = new Float32Array(samples.length);
+		for (let i = 0; i < samples.length; i++) {
+			buffer[i] = samples[i] / 32768.0;
+		}
+		let encoded = encodeWithLyra(buffer, 16000);
+		// Done
+		chunk.data = encoded.buffer;
+		controller.enqueue(chunk);
+	},
+	flush() {
+		console.log("[Lyra encode transform] Closing");
+		// 可以选择处理剩余的不完整数据或丢弃
+	}
+});
+
+var lyraDecodeTransform = new TransformStream({
+	start() {
+		// Called on startup.
+		console.log("[Lyra encode transform] Startup");
+	},
+	transform(chunk, controller) {
+		// Decode the Lyra audio to uncompressed audio (L16), so that
+		// we can play back the incoming Lyra stream
+		let encoded = new Uint8Array(chunk.data);
+		let decoded = decodeWithLyra(encoded, 16000, 320);
+		// Convert Float32 [-1,1] to Int16 with proper asymmetry and clamp
+		let samples = new Int16Array(decoded.length);
+		for (let i = 0; i < decoded.length; i++) {
+			let v = Math.max(-1.0, Math.min(1.0, decoded[i]));
+			samples[i] = v < 0 ? (v * 0x8000) : (v * 0x7FFF);
+		}
+		// Convert to big-endian for L16 payload back into the pipeline
+		let out = new Uint8Array(samples.buffer.slice(0));
+		for (let i = 0; i < out.length; i += 2) {
+			let b0 = out[i];
+			out[i] = out[i + 1];
+			out[i + 1] = b0;
+		}
+		// Done
+		chunk.data = out.buffer;
+		controller.enqueue(chunk);
+	},
+	flush() {
+		// Called when the stream is about to be closed
+		console.log("[Lyra encode transform] Closing");
+	}
+});
