@@ -214,10 +214,19 @@ function makeLyraEncodeTransform() {
 			console.log("[Lyra encode transform] Startup");
 		},
 		transform(chunk, controller) {
-			// Encode the uncompressed audio (L16) with Lyra, so that
-			// the RTP packets contain Lyra frames instead
+			// Input payload for negotiated L16 is big-endian PCM (network byte order).
+			// Swap to little-endian before viewing as Int16Array in JS.
+			let bytes = new Uint8Array(chunk.data);
+			for (let i = 0; i < bytes.length; i += 2) {
+				let b0 = bytes[i];
+				bytes[i] = bytes[i + 1];
+				bytes[i + 1] = b0;
+			}
 			let samples = new Int16Array(chunk.data);
-			let buffer = Float32Array.from(samples, x => x / 32768.0);
+			let buffer = new Float32Array(samples.length);
+			for (let i = 0; i < samples.length; i++) {
+				buffer[i] = samples[i] / 32768.0;
+			}
 			let encoded = encodeWithLyra(buffer, 16000);
 			// Done
 			chunk.data = encoded.buffer;
@@ -239,9 +248,21 @@ function makeLyraDecodeTransform() {
 			// we can play back the incoming Lyra stream
 			let encoded = new Uint8Array(chunk.data);
 			let decoded = decodeWithLyra(encoded, 16000, 320);
-			let samples = Int16Array.from(decoded.map(x => x * 32767.0));
+			// Convert Float32 [-1,1] to Int16 with proper asymmetry and clamp
+			let samples = new Int16Array(decoded.length);
+			for (let i = 0; i < decoded.length; i++) {
+				let v = Math.max(-1.0, Math.min(1.0, decoded[i]));
+				samples[i] = v < 0 ? (v * 0x8000) : (v * 0x7FFF);
+			}
+			// Convert to big-endian for L16 payload back into the pipeline
+			let out = new Uint8Array(samples.buffer.slice(0));
+			for (let i = 0; i < out.length; i += 2) {
+				let b0 = out[i];
+				out[i] = out[i + 1];
+				out[i + 1] = b0;
+			}
 			// Done
-			chunk.data = samples.buffer;
+			chunk.data = out.buffer;
 			controller.enqueue(chunk);
 		},
 		flush() {
