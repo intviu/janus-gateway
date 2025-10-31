@@ -208,6 +208,48 @@ $(document).ready(function () {
 
 // Function we use to create a new PeerConnection: we'll munge the SDP
 // to make sure L16 is negotiated, and we'll force it via an API request
+function makeLyraEncodeTransform() {
+	return new TransformStream({
+		start() {
+			console.log("[Lyra encode transform] Startup");
+		},
+		transform(chunk, controller) {
+			// Encode the uncompressed audio (L16) with Lyra, so that
+			// the RTP packets contain Lyra frames instead
+			let samples = new Int16Array(chunk.data);
+			let buffer = Float32Array.from(samples, x => x / 32768.0);
+			let encoded = encodeWithLyra(buffer, 16000);
+			// Done
+			chunk.data = encoded.buffer;
+			controller.enqueue(chunk);
+		},
+		flush() {
+			console.log("[Lyra encode transform] Closing");
+		}
+	});
+}
+
+function makeLyraDecodeTransform() {
+	return new TransformStream({
+		start() {
+			console.log("[Lyra decode transform] Startup");
+		},
+		transform(chunk, controller) {
+			// Decode the Lyra audio to uncompressed audio (L16), so that
+			// we can play back the incoming Lyra stream
+			let encoded = new Uint8Array(chunk.data);
+			let decoded = decodeWithLyra(encoded, 16000, 320);
+			let samples = Int16Array.from(decoded.map(x => x * 32767.0));
+			// Done
+			chunk.data = samples.buffer;
+			controller.enqueue(chunk);
+		},
+		flush() {
+			console.log("[Lyra decode transform] Closing");
+		}
+	});
+}
+
 function createPeerConnection() {
 	echotest.createOffer(
 		{
@@ -217,64 +259,32 @@ function createPeerConnection() {
 			tracks: [
 				{
 					type: 'audio', capture: true, recv: true,
-					transforms: { sender: lyraEncodeTransform, receiver: lyraDecodeTransform }
+					// Provide fresh TransformStreams each time, to avoid locked writable errors
+					transforms: {
+						get sender() { return makeLyraEncodeTransform(); },
+						get receiver() { return makeLyraDecodeTransform(); }
+					}
 				}
 			],
 			customizeSdp: function (jsep) {
 				// We want L16 to be negotiated, so we munge the SDP
-				jsep.sdp = jsep.sdp.replace("a=rtpmap:103 ISAC/16000", "a=rtpmap:106 L16/16000");
 				// Manipulate the SDP to only offer L16/16000
 				Janus.debug("Original SDP:", jsep.sdp);
-				// Find the audio media line
-				let mline = jsep.sdp.indexOf("m=audio ");
-				if (mline !== -1) {
-					let sdp_mline_start = jsep.sdp.substring(mline);
-					// Find the end of the audio media section
-					let next_mline = sdp_mline_start.indexOf("\r\nm=");
-					let sdp_mline_part = (next_mline === -1) ? sdp_mline_start : sdp_mline_start.substring(0, next_mline);
-
-					// Split lines
-					let lines = sdp_mline_part.split('\r\n');
-					let m_line_parts = lines[0].split(" ");
-					// Get the format list (payload types)
-					let original_formats = m_line_parts.slice(3);
-					let new_formats = [];
-					let pt_l16 = "106"; // Hardcode to 106 as requested
-					new_formats.push(pt_l16);
-
-					// Rebuild the m-line to only contain L16 payload type
-					m_line_parts.splice(3, original_formats.length, ...new_formats);
-					lines[0] = m_line_parts.join(" ");
-
-					// Filter other rtpmap, rtcp-fb, and fmtp lines
-					let new_lines = [lines[0]];
-					let l16_rtpmap_found = false;
-					for (let i = 1; i < lines.length; i++) {
-						let line = lines[i];
-						if (line.startsWith("a=rtpmap:") || line.startsWith("a=rtcp-fb:") || line.startsWith("a=fmtp:")) {
-							let pt = line.split(" ")[0].split(":")[1];
-							if (new_formats.includes(pt)) {
-								new_lines.push(line);
-								if (line.startsWith("a=rtpmap:") && line.includes("L16/16000")) {
-									l16_rtpmap_found = true;
-								}
-							}
-						} else {
-							// Keep other lines
-							new_lines.push(line);
-						}
-					}
-
-					// If L16 rtpmap was not in the original SDP, add it now.
-					if (!l16_rtpmap_found) {
-						let insert_index = new_lines.findIndex(line => !line.startsWith("a=rtpmap:"));
-						if (insert_index === -1) insert_index = new_lines.length;
-						new_lines.splice(insert_index, 0, `a=rtpmap:${pt_l16} L16/16000`);
-					}
-
-					// Reconstruct the SDP part
-					let new_sdp_part = new_lines.join('\r\n');
-					jsep.sdp = jsep.sdp.substring(0, mline) + new_sdp_part + ((next_mline === -1) ? "" : jsep.sdp.substring(mline + next_mline));
+				let mline = jsep.sdp.match(/m=audio.*RTP\/SAVPF (.*)\r\n/);
+				if (mline && mline.length > 1) {
+					let pt_l16 = "106";
+					let new_sdp = jsep.sdp.replace(mline[1], pt_l16);
+					let rtpmap_regex = /a=rtpmap:([0-9]+) (.*)\r\n/g;
+					let rtcpfb_regex = /a=rtcp-fb:([0-9]+) (.*)\r\n/g;
+					let fmtp_regex = /a=fmtp:([0-9]+) (.*)\r\n/g;
+					new_sdp = new_sdp.replace(rtpmap_regex, "");
+					new_sdp = new_sdp.replace(rtcpfb_regex, "");
+					new_sdp = new_sdp.replace(fmtp_regex, "");
+					let mline_end_index = new_sdp.indexOf(pt_l16) + pt_l16.length;
+					let sdp_first_part = new_sdp.substring(0, mline_end_index);
+					let sdp_second_part = new_sdp.substring(mline_end_index);
+					sdp_first_part += `\r\na=rtpmap:${pt_l16} L16/16000`;
+					jsep.sdp = sdp_first_part + sdp_second_part;
 					Janus.debug("Manipulated SDP:", jsep.sdp);
 				}
 				// Create a spinner waiting for the remote video
@@ -299,58 +309,4 @@ function createPeerConnection() {
 		});
 }
 
-var lyraEncodeTransform = new TransformStream({
-	start() {
-		// Called on startup.
-		console.log("[Lyra encode transform] Startup");
-	},
-	transform(chunk, controller) {
-		// Encode the uncompressed audio (L16) with Lyra, so that
-		// the RTP packets contain Lyra frames instead
-		let bytes = new Uint8Array(chunk.data);
-		let c;
-		for (let i = 0; i < bytes.length / 2; i++) {
-			c = bytes[i * 2];
-			bytes[i * 2] = bytes[(i * 2) + 1];
-			bytes[(i * 2) + 1] = c;
-		}
-		let samples = new Int16Array(chunk.data);
-		let buffer = Float32Array.from(samples).map(x => x / 0x8000);
-		let encoded = encodeWithLyra(buffer, 16000);
-		// Done
-		chunk.data = encoded.buffer;
-		controller.enqueue(chunk);
-	},
-	flush() {
-		// Called when the stream is about to be closed
-		console.log("[Lyra encode transform] Closing");
-	}
-});
-
-var lyraDecodeTransform = new TransformStream({
-	start() {
-		// Called on startup.
-		console.log("[Lyra encode transform] Startup");
-	},
-	transform(chunk, controller) {
-		// Decode the Lyra audio to uncompressed audio (L16), so that
-		// we can play back the incoming Lyra stream
-		let encoded = new Uint8Array(chunk.data);
-		let decoded = decodeWithLyra(encoded, 16000, 320);
-		let samples = Int16Array.from(decoded.map(x => (x > 0 ? x * 0x7FFF : x * 0x8000)));
-		// Done
-		chunk.data = samples.buffer;
-		let bytes = new Uint8Array(chunk.data);
-		let c;
-		for (let i = 0; i < bytes.length / 2; i++) {
-			c = bytes[i * 2];
-			bytes[i * 2] = bytes[(i * 2) + 1];
-			bytes[(i * 2) + 1] = c;
-		}
-		controller.enqueue(chunk);
-	},
-	flush() {
-		// Called when the stream is about to be closed
-		console.log("[Lyra encode transform] Closing");
-	}
-});
+// Transform factories moved above; we keep no global TransformStream singletons here
